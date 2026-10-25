@@ -17,10 +17,15 @@ param (
     [string[]]$ForwardArgs
 )
 
-$BASE = if ($env:MULTIGRAVITY_HOME) { $env:MULTIGRAVITY_HOME } else { "$env:USERPROFILE\AntigravityProfiles" }
+$REAL_USERPROFILE = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+$REAL_APPDATA = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData)
+$REAL_LOCALAPPDATA = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+
+$BASE = if ($env:MULTIGRAVITY_HOME) { $env:MULTIGRAVITY_HOME } else { "$REAL_USERPROFILE\AntigravityProfiles" }
 
 function Find-Antigravity {
     $paths = @(
+        "$REAL_LOCALAPPDATA\Programs\Antigravity\Antigravity.exe",
         "$env:LOCALAPPDATA\Programs\Antigravity\Antigravity.exe",
         "$env:PROGRAMFILES\Antigravity\Antigravity.exe",
         "${env:ProgramFiles(x86)}\Antigravity\Antigravity.exe"
@@ -39,11 +44,11 @@ function Find-Antigravity {
 $APP = if ($env:MULTIGRAVITY_APP) { $env:MULTIGRAVITY_APP } else { Find-Antigravity }
 
 function Get-DefaultUserDataDir {
-    return "$env:APPDATA\Antigravity"
+    return "$REAL_APPDATA\Antigravity"
 }
 
 function Get-DefaultExtensionsDir {
-    return "$env:USERPROFILE\.antigravity\extensions"
+    return "$REAL_USERPROFILE\.antigravity\extensions"
 }
 
 function Get-TemplatesDir {
@@ -67,6 +72,7 @@ function Write-Usage {
     Write-Host "  rename <old> <new>      Rename a profile (updates shortcut if present)"
     Write-Host "  delete <name>           Delete a profile and its data"
     Write-Host "  clone <src> <dest>      Clone an existing profile"
+    Write-Host "  sync <profile>          Sync default installation into a named profile"
     Write-Host "  template save <profile> <name>   Save a profile as a reusable template"
     Write-Host "  template list           List available templates"
     Write-Host "  template delete <name>  Delete a template"
@@ -94,6 +100,52 @@ function Validate-Name {
     }
 }
 
+function Invoke-LinkSharedCustomizations {
+    param($PROFILE)
+    $PROFILE_DIR = "$BASE\$PROFILE"
+
+    # Link .agentrc (global skills, rules, agents)
+    if (Test-Path "$REAL_USERPROFILE\.agentrc") {
+        $dest = "$PROFILE_DIR\.agentrc"
+        if (!(Test-Path $dest)) {
+            New-Item -ItemType Junction -Path $dest -Target "$REAL_USERPROFILE\.agentrc" -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+
+    # Link .codegraph
+    if (Test-Path "$REAL_USERPROFILE\.codegraph") {
+        $dest = "$PROFILE_DIR\.codegraph"
+        if (!(Test-Path $dest)) {
+            New-Item -ItemType Junction -Path $dest -Target "$REAL_USERPROFILE\.codegraph" -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+
+    # Link agents in .gemini/config/agents
+    if (Test-Path "$REAL_USERPROFILE\.gemini\config\agents") {
+        $configDir = "$PROFILE_DIR\.gemini\config"
+        New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+        $dest = "$configDir\agents"
+        if (!(Test-Path $dest)) {
+            New-Item -ItemType Junction -Path $dest -Target "$REAL_USERPROFILE\.gemini\config\agents" -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+
+    # Link mcp_config.json, hooks.json, skills.json
+    $configDir = "$PROFILE_DIR\.gemini\config"
+    New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+    foreach ($f in @("mcp_config.json", "hooks.json", "skills.json")) {
+        $src = "$REAL_USERPROFILE\.gemini\config\$f"
+        $dest = "$configDir\$f"
+        if ((Test-Path $src) -and !(Test-Path $dest)) {
+            try {
+                New-Item -ItemType HardLink -Path $dest -Target $src -ErrorAction Stop | Out-Null
+            } catch {
+                Copy-Item $src $dest -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 function Invoke-CreateProfile {
     param($PROFILE)
     $PROFILE_DIR = "$BASE\$PROFILE"
@@ -101,6 +153,8 @@ function Invoke-CreateProfile {
     New-Item -ItemType Directory -Force -Path "$PROFILE_DIR\.antigravity\extensions" | Out-Null
     New-Item -ItemType Directory -Force -Path "$PROFILE_DIR\AppData\Roaming" | Out-Null
     New-Item -ItemType Directory -Force -Path "$PROFILE_DIR\AppData\Local" | Out-Null
+
+    Invoke-LinkSharedCustomizations $PROFILE
 }
 
 function Invoke-CreateAuthOnlyProfile {
@@ -119,26 +173,48 @@ function Invoke-CreateAuthOnlyProfile {
     New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
     New-Item -ItemType Directory -Force -Path "$PROFILE_DIR\AppData\Local" | Out-Null
 
-    # Symlink shared settings from default installation
+    # Symlink/Link shared settings from default installation
     if (Test-Path "$defaultData\User") {
         foreach ($item in @("settings.json", "keybindings.json", "snippets")) {
             $src = "$defaultData\User\$item"
             $dest = "$dataDir\$item"
             if ((Test-Path $src) -and !(Test-Path $dest)) {
-                New-Item -ItemType SymbolicLink -Path $dest -Target $src -ErrorAction SilentlyContinue | Out-Null
+                if (Test-Path -Path $src -PathType Container) {
+                    try {
+                        New-Item -ItemType Junction -Path $dest -Target $src -ErrorAction Stop | Out-Null
+                    } catch {
+                        New-Item -ItemType SymbolicLink -Path $dest -Target $src -ErrorAction SilentlyContinue | Out-Null
+                    }
+                } else {
+                    try {
+                        New-Item -ItemType HardLink -Path $dest -Target $src -ErrorAction Stop | Out-Null
+                    } catch {
+                        try {
+                            New-Item -ItemType SymbolicLink -Path $dest -Target $src -ErrorAction Stop | Out-Null
+                        } catch {
+                            Copy-Item -Path $src -Destination $dest -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
             }
         }
     }
 
-    # Symlink extensions to default (shared, not copied)
+    # Symlink/Junction extensions to default (shared, not copied)
     $extDir = "$PROFILE_DIR\.antigravity\extensions"
     if (Test-Path $defaultExt) {
-        if (Test-Path $extDir) { Remove-Item $extDir -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $extDir) { Remove-Item $extDir -Force -Recurse -ErrorAction SilentlyContinue }
         New-Item -ItemType Directory -Force -Path "$PROFILE_DIR\.antigravity" | Out-Null
-        New-Item -ItemType SymbolicLink -Path $extDir -Target $defaultExt -ErrorAction SilentlyContinue | Out-Null
+        try {
+            New-Item -ItemType Junction -Path $extDir -Target $defaultExt -ErrorAction Stop | Out-Null
+        } catch {
+            New-Item -ItemType SymbolicLink -Path $extDir -Target $defaultExt -ErrorAction SilentlyContinue | Out-Null
+        }
     } else {
         New-Item -ItemType Directory -Force -Path $extDir | Out-Null
     }
+
+    Invoke-LinkSharedCustomizations $PROFILE
 }
 
 function Invoke-LaunchProfile {
@@ -158,15 +234,29 @@ function Invoke-LaunchProfile {
     Write-Host "Launching Antigravity profile '$PROFILE'"
     
     # Launch Antigravity with isolated USERPROFILE
-    $env:USERPROFILE = $PROFILE_DIR
-    $env:APPDATA = "$PROFILE_DIR\AppData\Roaming"
-    $env:LOCALAPPDATA = "$PROFILE_DIR\AppData\Local"
-    
-    if ($ArgsToForward) {
-        Start-Process -FilePath $APP -ArgumentList $ArgsToForward
+    $origUserProfile = $env:USERPROFILE
+    $origAppData = $env:APPDATA
+    $origLocalAppData = $env:LOCALAPPDATA
+    $origSshConnection = $env:SSH_CONNECTION
+    try {
+        $env:USERPROFILE = $PROFILE_DIR
+        $env:APPDATA = "$PROFILE_DIR\AppData\Roaming"
+        $env:LOCALAPPDATA = "$PROFILE_DIR\AppData\Local"
+        # Trip language_server shouldBypassKeyring so credentials store per-profile instead of Windows Credential Manager
+        $env:SSH_CONNECTION = "127.0.0.1 1234 127.0.0.1 22"
+        
+        if ($ArgsToForward) {
+            Start-Process -FilePath $APP -ArgumentList $ArgsToForward
+        }
+        else {
+            Start-Process -FilePath $APP
+        }
     }
-    else {
-        Start-Process -FilePath $APP
+    finally {
+        $env:USERPROFILE = $origUserProfile
+        $env:APPDATA = $origAppData
+        $env:LOCALAPPDATA = $origLocalAppData
+        $env:SSH_CONNECTION = $origSshConnection
     }
 }
 
@@ -194,7 +284,14 @@ function Invoke-ListProfiles {
 function Invoke-CreateShortcut {
     param($PROFILE)
     $APP_NAME = "Multigravity $PROFILE"
-    $SHORTCUT_PATH = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\$APP_NAME.lnk"
+    $programsDir = [Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)
+    if ([string]::IsNullOrEmpty($programsDir)) {
+        $programsDir = "$REAL_APPDATA\Microsoft\Windows\Start Menu\Programs"
+    }
+    if (!(Test-Path $programsDir)) {
+        New-Item -ItemType Directory -Force -Path $programsDir | Out-Null
+    }
+    $SHORTCUT_PATH = Join-Path $programsDir "$APP_NAME.lnk"
     
     $SCRIPT_PATH = $MyInvocation.MyCommand.Path
     # If script path is empty (e.g. running from prompt), try to find it
@@ -203,16 +300,20 @@ function Invoke-CreateShortcut {
         if ($cmdObj) { $SCRIPT_PATH = $cmdObj.Source }
     }
     
-    $WshShell = New-Object -comObject WScript.Shell
-    $Shortcut = $WshShell.CreateShortcut($SHORTCUT_PATH)
-    $Shortcut.TargetPath = "powershell.exe"
-    $Shortcut.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -Command `"& '$SCRIPT_PATH' $PROFILE`""
-    if ($APP) {
-        $Shortcut.IconLocation = "$APP, 0"
-    }
-    $Shortcut.Save()
+    try {
+        $WshShell = New-Object -comObject WScript.Shell
+        $Shortcut = $WshShell.CreateShortcut($SHORTCUT_PATH)
+        $Shortcut.TargetPath = "powershell.exe"
+        $Shortcut.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -Command `"& '$SCRIPT_PATH' $PROFILE`""
+        if ($APP) {
+            $Shortcut.IconLocation = "$APP, 0"
+        }
+        $Shortcut.Save()
 
-    Write-Host "Shortcut created: $SHORTCUT_PATH"
+        Write-Host "Shortcut created: $SHORTCUT_PATH"
+    } catch {
+        Write-Warning "Could not save shortcut to '$SHORTCUT_PATH': $_"
+    }
 }
 
 function Invoke-NewProfile {
@@ -282,7 +383,11 @@ function Invoke-DeleteProfile {
         try {
             Remove-Item -Recurse -Force $PROFILE_DIR -ErrorAction Stop
             
-            $SHORTCUT_PATH = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Multigravity $PROFILE.lnk"
+            $programsDir = [Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)
+            if ([string]::IsNullOrEmpty($programsDir)) {
+                $programsDir = "$REAL_APPDATA\Microsoft\Windows\Start Menu\Programs"
+            }
+            $SHORTCUT_PATH = Join-Path $programsDir "Multigravity $PROFILE.lnk"
             if (Test-Path $SHORTCUT_PATH) {
                 Remove-Item -Force $SHORTCUT_PATH
                 Write-Host "Removed shortcut: $SHORTCUT_PATH"
@@ -317,7 +422,11 @@ function Invoke-RenameProfile {
 
     Rename-Item -Path $OLD_DIR -NewName $NEW
 
-    $OLD_SHORTCUT = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Multigravity $OLD.lnk"
+    $programsDir = [Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)
+    if ([string]::IsNullOrEmpty($programsDir)) {
+        $programsDir = "$REAL_APPDATA\Microsoft\Windows\Start Menu\Programs"
+    }
+    $OLD_SHORTCUT = Join-Path $programsDir "Multigravity $OLD.lnk"
     if (Test-Path $OLD_SHORTCUT) {
         Remove-Item -Force $OLD_SHORTCUT
         Invoke-CreateShortcut $NEW
@@ -678,6 +787,67 @@ function Invoke-ImportProfile {
     Write-Host "Imported profile '$PROFILE'"
 }
 
+function Invoke-SyncProfile {
+    param($PROFILE)
+    Validate-Name $PROFILE
+    $PROFILE_DIR = "$BASE\$PROFILE"
+    if (!(Test-Path $PROFILE_DIR)) {
+        Write-Error "Error: profile '$PROFILE' does not exist"
+        exit 1
+    }
+
+    Write-Host "Syncing default installation into profile '$PROFILE'..."
+    
+    # 1. Junction .agentrc and .codegraph if missing
+    if (Test-Path "$REAL_USERPROFILE\.agentrc") {
+        $target = "$PROFILE_DIR\.agentrc"
+        if (!(Test-Path $target)) {
+            New-Item -ItemType Junction -Path $target -Target "$REAL_USERPROFILE\.agentrc" -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+    if (Test-Path "$REAL_USERPROFILE\.codegraph") {
+        $target = "$PROFILE_DIR\.codegraph"
+        if (!(Test-Path $target)) {
+            New-Item -ItemType Junction -Path $target -Target "$REAL_USERPROFILE\.codegraph" -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+
+    # 2. Sync .gemini/config
+    if (Test-Path "$REAL_USERPROFILE\.gemini\config") {
+        robocopy "$REAL_USERPROFILE\.gemini\config" "$PROFILE_DIR\.gemini\config" /E /R:1 /W:1 /XF "*.lock" | Out-Null
+    }
+
+    # 3. Sync conversation_summaries.db
+    if (Test-Path "$REAL_USERPROFILE\.gemini\antigravity\conversation_summaries.db") {
+        Copy-Item "$REAL_USERPROFILE\.gemini\antigravity\conversation_summaries.db*" -Destination "$PROFILE_DIR\.gemini\antigravity\" -Force
+    }
+
+    # 4. Sync conversations
+    if (Test-Path "$REAL_USERPROFILE\.gemini\antigravity\conversations") {
+        robocopy "$REAL_USERPROFILE\.gemini\antigravity\conversations" "$PROFILE_DIR\.gemini\antigravity\conversations" /E /R:1 /W:1 /XF "*.lock" | Out-Null
+    }
+
+    # 5. Sync brain (excluding huge log files)
+    if (Test-Path "$REAL_USERPROFILE\.gemini\antigravity\brain") {
+        robocopy "$REAL_USERPROFILE\.gemini\antigravity\brain" "$PROFILE_DIR\.gemini\antigravity\brain" /E /R:1 /W:1 /XF "*.log" "*.lock" | Out-Null
+    }
+
+    # 6. Sync app_storage.json
+    if (Test-Path "$REAL_APPDATA\Antigravity\app_storage.json") {
+        Copy-Item "$REAL_APPDATA\Antigravity\app_storage.json" -Destination "$PROFILE_DIR\AppData\Roaming\Antigravity\app_storage.json" -Force
+    }
+
+    # 7. Sync Local Storage & Session Storage
+    if (Test-Path "$REAL_APPDATA\Antigravity\Local Storage") {
+        robocopy "$REAL_APPDATA\Antigravity\Local Storage" "$PROFILE_DIR\AppData\Roaming\Antigravity\Local Storage" /E /R:1 /W:1 /XF "*.lock" "LOCK" | Out-Null
+    }
+    if (Test-Path "$REAL_APPDATA\Antigravity\Session Storage") {
+        robocopy "$REAL_APPDATA\Antigravity\Session Storage" "$PROFILE_DIR\AppData\Roaming\Antigravity\Session Storage" /E /R:1 /W:1 /XF "*.lock" "LOCK" | Out-Null
+    }
+
+    Write-Host "Profile '$PROFILE' successfully synced!"
+}
+
 switch ($cmd) {
     "new" {
         $extraArgs = @()
@@ -699,6 +869,9 @@ switch ($cmd) {
     }
     "clone" {
         Invoke-CloneProfile $arg1 $arg2
+    }
+    "sync" {
+        Invoke-SyncProfile $arg1
     }
     "template" {
         switch ($arg1) {

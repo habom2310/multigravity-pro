@@ -168,6 +168,7 @@ multigravity <name> [args...]         Launch a profile
 multigravity list                     List all profiles
 multigravity status                   Show running/stopped, type, last used, size
 multigravity clone <src> <dest>       Copy a profile
+multigravity sync <profile>           Sync default installation into a profile
 multigravity rename <old> <new>       Rename a profile
 multigravity delete <name>            Delete a profile (with confirmation)
 multigravity template save <profile> <name>
