@@ -144,6 +144,19 @@ function Invoke-LinkSharedCustomizations {
             }
         }
     }
+
+    # Link GEMINI.md (global instructions and agentrc rules)
+    $srcRules = "$REAL_USERPROFILE\.gemini\GEMINI.md"
+    $geminiDir = "$PROFILE_DIR\.gemini"
+    New-Item -ItemType Directory -Force -Path $geminiDir | Out-Null
+    $destRules = "$geminiDir\GEMINI.md"
+    if ((Test-Path $srcRules) -and !(Test-Path $destRules)) {
+        try {
+            New-Item -ItemType HardLink -Path $destRules -Target $srcRules -ErrorAction Stop | Out-Null
+        } catch {
+            Copy-Item $srcRules $destRules -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Invoke-CreateProfile {
@@ -238,10 +251,12 @@ function Invoke-LaunchProfile {
     $origAppData = $env:APPDATA
     $origLocalAppData = $env:LOCALAPPDATA
     $origSshConnection = $env:SSH_CONNECTION
+    $origAgentrcHome = $env:AGENTRC_HOME
     try {
         $env:USERPROFILE = $PROFILE_DIR
         $env:APPDATA = "$PROFILE_DIR\AppData\Roaming"
         $env:LOCALAPPDATA = "$PROFILE_DIR\AppData\Local"
+        $env:AGENTRC_HOME = $REAL_USERPROFILE
         # Trip language_server shouldBypassKeyring so credentials store per-profile instead of Windows Credential Manager
         $env:SSH_CONNECTION = "127.0.0.1 1234 127.0.0.1 22"
         
@@ -257,6 +272,7 @@ function Invoke-LaunchProfile {
         $env:APPDATA = $origAppData
         $env:LOCALAPPDATA = $origLocalAppData
         $env:SSH_CONNECTION = $origSshConnection
+        $env:AGENTRC_HOME = $origAgentrcHome
     }
 }
 
@@ -814,7 +830,23 @@ function Invoke-SyncProfile {
 
     # 2. Sync .gemini/config
     if (Test-Path "$REAL_USERPROFILE\.gemini\config") {
-        robocopy "$REAL_USERPROFILE\.gemini\config" "$PROFILE_DIR\.gemini\config" /E /R:1 /W:1 /XF "*.lock" | Out-Null
+        robocopy "$REAL_USERPROFILE\.gemini\config" "$PROFILE_DIR\.gemini\config" /E /R:1 /W:1 /XF "*.lock" /XJ | Out-Null
+    }
+
+    if (Test-Path "$REAL_USERPROFILE\.gemini\GEMINI.md") {
+        $geminiDir = "$PROFILE_DIR\.gemini"
+        New-Item -ItemType Directory -Force -Path $geminiDir | Out-Null
+        $targetRules = "$geminiDir\GEMINI.md"
+        if (!(Test-Path $targetRules)) {
+            try {
+                New-Item -ItemType HardLink -Path $targetRules -Target "$REAL_USERPROFILE\.gemini\GEMINI.md" -ErrorAction Stop | Out-Null
+            } catch {
+                Copy-Item "$REAL_USERPROFILE\.gemini\GEMINI.md" $targetRules -Force -ErrorAction SilentlyContinue
+            }
+        } elseif ((Get-Item $targetRules).LinkType -ne "HardLink") {
+            # If target is a detached copy (e.g. cross-volume fallback), update it
+            Copy-Item "$REAL_USERPROFILE\.gemini\GEMINI.md" $targetRules -Force -ErrorAction SilentlyContinue
+        }
     }
 
     # 3. Sync conversation_summaries.db
@@ -824,12 +856,12 @@ function Invoke-SyncProfile {
 
     # 4. Sync conversations
     if (Test-Path "$REAL_USERPROFILE\.gemini\antigravity\conversations") {
-        robocopy "$REAL_USERPROFILE\.gemini\antigravity\conversations" "$PROFILE_DIR\.gemini\antigravity\conversations" /E /R:1 /W:1 /XF "*.lock" | Out-Null
+        robocopy "$REAL_USERPROFILE\.gemini\antigravity\conversations" "$PROFILE_DIR\.gemini\antigravity\conversations" /E /R:1 /W:1 /XF "*.lock" /XJ | Out-Null
     }
 
     # 5. Sync brain (excluding huge log files)
     if (Test-Path "$REAL_USERPROFILE\.gemini\antigravity\brain") {
-        robocopy "$REAL_USERPROFILE\.gemini\antigravity\brain" "$PROFILE_DIR\.gemini\antigravity\brain" /E /R:1 /W:1 /XF "*.log" "*.lock" | Out-Null
+        robocopy "$REAL_USERPROFILE\.gemini\antigravity\brain" "$PROFILE_DIR\.gemini\antigravity\brain" /E /R:1 /W:1 /XF "*.log" "*.lock" /XJ | Out-Null
     }
 
     # 6. Sync app_storage.json
@@ -839,10 +871,10 @@ function Invoke-SyncProfile {
 
     # 7. Sync Local Storage & Session Storage
     if (Test-Path "$REAL_APPDATA\Antigravity\Local Storage") {
-        robocopy "$REAL_APPDATA\Antigravity\Local Storage" "$PROFILE_DIR\AppData\Roaming\Antigravity\Local Storage" /E /R:1 /W:1 /XF "*.lock" "LOCK" | Out-Null
+        robocopy "$REAL_APPDATA\Antigravity\Local Storage" "$PROFILE_DIR\AppData\Roaming\Antigravity\Local Storage" /E /R:1 /W:1 /XF "*.lock" "LOCK" /XJ | Out-Null
     }
     if (Test-Path "$REAL_APPDATA\Antigravity\Session Storage") {
-        robocopy "$REAL_APPDATA\Antigravity\Session Storage" "$PROFILE_DIR\AppData\Roaming\Antigravity\Session Storage" /E /R:1 /W:1 /XF "*.lock" "LOCK" | Out-Null
+        robocopy "$REAL_APPDATA\Antigravity\Session Storage" "$PROFILE_DIR\AppData\Roaming\Antigravity\Session Storage" /E /R:1 /W:1 /XF "*.lock" "LOCK" /XJ | Out-Null
     }
 
     Write-Host "Profile '$PROFILE' successfully synced!"
