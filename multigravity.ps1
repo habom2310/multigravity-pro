@@ -837,14 +837,12 @@ function Invoke-SyncProfile {
         $geminiDir = "$PROFILE_DIR\.gemini"
         New-Item -ItemType Directory -Force -Path $geminiDir | Out-Null
         $targetRules = "$geminiDir\GEMINI.md"
-        if (!(Test-Path $targetRules)) {
-            try {
-                New-Item -ItemType HardLink -Path $targetRules -Target "$REAL_USERPROFILE\.gemini\GEMINI.md" -ErrorAction Stop | Out-Null
-            } catch {
-                Copy-Item "$REAL_USERPROFILE\.gemini\GEMINI.md" $targetRules -Force -ErrorAction SilentlyContinue
-            }
-        } elseif ((Get-Item $targetRules).LinkType -ne "HardLink") {
-            # If target is a detached copy (e.g. cross-volume fallback), update it
+        if (Test-Path $targetRules) {
+            Remove-Item -Force $targetRules -ErrorAction SilentlyContinue
+        }
+        try {
+            New-Item -ItemType HardLink -Path $targetRules -Target "$REAL_USERPROFILE\.gemini\GEMINI.md" -ErrorAction Stop | Out-Null
+        } catch {
             Copy-Item "$REAL_USERPROFILE\.gemini\GEMINI.md" $targetRules -Force -ErrorAction SilentlyContinue
         }
     }
