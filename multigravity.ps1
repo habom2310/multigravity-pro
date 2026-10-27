@@ -256,7 +256,7 @@ function Invoke-LaunchProfile {
         $env:USERPROFILE = $PROFILE_DIR
         $env:APPDATA = "$PROFILE_DIR\AppData\Roaming"
         $env:LOCALAPPDATA = "$PROFILE_DIR\AppData\Local"
-        $env:AGENTRC_HOME = $REAL_USERPROFILE
+        $env:AGENTRC_HOME = if ($origAgentrcHome) { $origAgentrcHome } else { $REAL_USERPROFILE }
         # Trip language_server shouldBypassKeyring so credentials store per-profile instead of Windows Credential Manager
         $env:SSH_CONNECTION = "127.0.0.1 1234 127.0.0.1 22"
         
@@ -825,6 +825,13 @@ function Invoke-SyncProfile {
         $target = "$PROFILE_DIR\.codegraph"
         if (!(Test-Path $target)) {
             New-Item -ItemType Junction -Path $target -Target "$REAL_USERPROFILE\.codegraph" -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+    if (Test-Path "$REAL_USERPROFILE\.gemini\config\agents") {
+        $destAgents = "$PROFILE_DIR\.gemini\config\agents"
+        if (!(Test-Path $destAgents)) {
+            New-Item -ItemType Directory -Force -Path "$PROFILE_DIR\.gemini\config" | Out-Null
+            New-Item -ItemType Junction -Path $destAgents -Target "$REAL_USERPROFILE\.gemini\config\agents" -ErrorAction SilentlyContinue | Out-Null
         }
     }
 
